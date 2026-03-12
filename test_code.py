@@ -43,7 +43,7 @@ class Robot(Node):
 
         # Area thresholds
         self.follow_area = 800
-        self.stop_area = 12000
+        self.stop_area = 302000
 
         # Blue tracking
         self.blue_area = 0
@@ -94,12 +94,12 @@ class Robot(Node):
     def create_search_positions(self):
         # REPLACE THESE WITH YOUR REAL TESTED COORDINATES
         return [
-            [4.0, 1.0, 1.57],
-            [3.0, 2.2, 3.14],
-            [2.0, 1.5, 1.57],
-            [1.2, 1.2, 1.20],
-            [1.2, 3.0, 0.0],
-            [3.2, 3.2, 3.14]
+            [1.89, 1.09, 1.57],   # bottom-right starting patch, look upward
+            [-2.82, -4.22, -1.57],   # centre-right opening, look left
+            [4.71, -5.33, 3.14],   # lower-middle patch, look upward
+            [-2.82, -4.22, -1.57],   # lower-left patch, look up-right
+            [-6.84, -3.22, 0.0],    # upper-left patch, look right toward blue
+            [-8.00, -7.87, -1.57] 
         ]
 
     def reset_detection_flags(self):
