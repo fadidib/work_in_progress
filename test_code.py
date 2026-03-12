@@ -16,9 +16,9 @@ class Robot(Node):
     def __init__(self):
         super().__init__('robot')
 
-        print('RUNNING NEW PROJECT_FILE - NO CENTRE LINE VERSION')
+        print('RUNNING CLEAN PROJECT_FILE')
 
-        # Publisher for robot velocity
+        # Publisher
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
 
         # Nav2 action client
@@ -26,44 +26,67 @@ class Robot(Node):
         self.goal_handle = None
         self.goal_sent = False
         self.goal_done = True
+        self.arrived_at_search_pose = False
 
-        # Colour detection flags
+        # State machine
+        self.SEARCHING = 'SEARCHING'
+        self.SCANNING = 'SCANNING'
+        self.APPROACHING_BLUE = 'APPROACHING_BLUE'
+        self.FINISHED = 'FINISHED'
+        self.state = self.SEARCHING
+
+        # Detection flags
         self.green_flag = 0
         self.blue_flag = 0
         self.red_flag = 0
 
-        # Keep track of whether each colour has been seen at least once
+        # Current frame blue visibility
+        self.blue_visible_now = 0
+
+        # Seen at least once
         self.green_seen = 0
         self.blue_seen = 0
         self.red_seen = 0
 
-        # Sensitivity for HSV detection
+        # HSV sensitivity
         self.sensitivity = 10
 
-        # Area thresholds
+        # Detection thresholds
         self.follow_area = 800
         self.stop_area = 4000
 
-        # Blue box tracking
+        # Blue tracking
         self.blue_area = 0
         self.blue_cx = 0
         self.image_width = 640
         self.centre_margin = 60
+        self.last_seen_turn_direction = 'left'
 
-        # Blue persistence / recovery
-        self.blue_detect_counter = 0
-        self.blue_detect_threshold = 3
-        self.blue_lost_counter = 0
-        self.blue_lost_threshold = 10
+        # Blue confirmation
+        self.blue_detect_count = 0
+        self.blue_confirm_frames = 3
+
+        # Stop confirmation
+        self.stop_confirm_count = 0
+        self.stop_confirm_frames = 4
+
+        # Lost blue recovery
+        self.blue_lost_count = 0
+        self.blue_recovery_frames = 10
+
+        # Scan behaviour
+        self.scan_start_time = None
+        self.scan_duration = 2.0
+        self.scan_direction = 1
 
         # Task flag
         self.task_finished = False
 
-        # Grid-based search poses
+        # Search poses
         self.search_positions = self.create_search_positions()
         self.search_index = 0
 
-        # Debug image display
+        # Debug window
         self.show_debug = True
         if self.show_debug:
             cv2.namedWindow('Detection', cv2.WINDOW_NORMAL)
@@ -77,6 +100,7 @@ class Robot(Node):
         self.subscription
 
     def create_search_positions(self):
+        # REPLACE THESE WITH YOUR FINAL TESTED COORDINATES
         search_positions = [
             [4.0, 1.0, 1.57],
             [3.0, 2.2, 3.14],
@@ -90,6 +114,7 @@ class Robot(Node):
     def reset_detection_flags(self):
         self.green_flag = 0
         self.red_flag = 0
+        self.blue_visible_now = 0
         self.blue_area = 0
         self.blue_cx = 0
 
@@ -116,7 +141,7 @@ class Robot(Node):
         blue_lower = np.array([120 - self.sensitivity, 100, 100])
         blue_upper = np.array([120 + self.sensitivity, 255, 255])
 
-        # RED - two ranges
+        # RED - two ranges because red wraps around HSV
         red_lower_1 = np.array([0, 100, 100])
         red_upper_1 = np.array([self.sensitivity, 255, 255])
 
@@ -149,23 +174,11 @@ class Robot(Node):
         self.reset_detection_flags()
 
         self.detect_green(image, green_contours)
-        blue_seen_this_frame = self.detect_blue(image, blue_contours)
+        self.detect_blue(image, blue_contours)
         self.detect_red(image, red_contours)
 
-        # Blue persistence logic
-        if blue_seen_this_frame:
-            self.blue_detect_counter += 1
-            self.blue_lost_counter = 0
-        else:
-            self.blue_detect_counter = 0
-            self.blue_lost_counter += 1
-
-        if self.blue_detect_counter >= self.blue_detect_threshold:
-            self.blue_flag = 1
-            self.blue_seen = 1
-        elif self.blue_lost_counter >= self.blue_lost_threshold:
-            self.blue_flag = 0
-
+        self.update_blue_confirmation()
+        self.update_stop_confirmation()
         self.draw_debug_info(image)
 
         if self.show_debug:
@@ -190,6 +203,8 @@ class Robot(Node):
             area = cv2.contourArea(c)
 
             if area > self.follow_area:
+                self.blue_visible_now = 1
+                self.blue_seen = 1
                 self.blue_area = area
 
                 x, y, w, h = cv2.boundingRect(c)
@@ -201,9 +216,11 @@ class Robot(Node):
                     blue_cy = int(M['m01'] / M['m00'])
                     cv2.circle(image, (self.blue_cx, blue_cy), 5, (255, 0, 0), -1)
 
-                return True
-
-        return False
+                    image_centre = self.image_width // 2
+                    if self.blue_cx < image_centre:
+                        self.last_seen_turn_direction = 'left'
+                    else:
+                        self.last_seen_turn_direction = 'right'
 
     def detect_red(self, image, red_contours):
         if len(red_contours) > 0:
@@ -217,10 +234,26 @@ class Robot(Node):
                 x, y, w, h = cv2.boundingRect(c)
                 cv2.rectangle(image, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
+    def update_blue_confirmation(self):
+        if self.blue_visible_now == 1:
+            self.blue_detect_count += 1
+            self.blue_lost_count = 0
+        else:
+            self.blue_detect_count = 0
+
+        if self.blue_detect_count >= self.blue_confirm_frames:
+            self.blue_flag = 1
+
+    def update_stop_confirmation(self):
+        if self.blue_visible_now == 1 and self.blue_area > self.stop_area:
+            self.stop_confirm_count += 1
+        else:
+            self.stop_confirm_count = 0
+
     def draw_debug_info(self, image):
         cv2.putText(
             image,
-            'Seen R:{} G:{} B:{}'.format(self.red_seen, self.green_seen, self.blue_seen),
+            'State: {}'.format(self.state),
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -230,7 +263,7 @@ class Robot(Node):
 
         cv2.putText(
             image,
-            'Blue area: {}'.format(int(self.blue_area)),
+            'Seen R:{} G:{} B:{}'.format(self.red_seen, self.green_seen, self.blue_seen),
             (10, 50),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -240,8 +273,28 @@ class Robot(Node):
 
         cv2.putText(
             image,
-            'Blue flag: {}'.format(self.blue_flag),
+            'Blue area: {}'.format(int(self.blue_area)),
             (10, 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            image,
+            'Blue confirm: {}'.format(self.blue_detect_count),
+            (10, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            image,
+            'Stop confirm: {}'.format(self.stop_confirm_count),
+            (10, 125),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (255, 255, 255),
@@ -253,6 +306,11 @@ class Robot(Node):
         desired_velocity.linear.x = 0.12
         self.publisher.publish(desired_velocity)
 
+    def walk_backward(self):
+        desired_velocity = Twist()
+        desired_velocity.linear.x = -0.08
+        self.publisher.publish(desired_velocity)
+
     def turn_left(self):
         desired_velocity = Twist()
         desired_velocity.angular.z = 0.35
@@ -261,6 +319,11 @@ class Robot(Node):
     def turn_right(self):
         desired_velocity = Twist()
         desired_velocity.angular.z = -0.35
+        self.publisher.publish(desired_velocity)
+
+    def scan_turn(self):
+        desired_velocity = Twist()
+        desired_velocity.angular.z = 0.25 * self.scan_direction
         self.publisher.publish(desired_velocity)
 
     def stop(self):
@@ -283,6 +346,7 @@ class Robot(Node):
 
         self.goal_sent = True
         self.goal_done = False
+        self.arrived_at_search_pose = False
 
         self.send_goal_future = self.navigate_client.send_goal_async(goal_msg)
         self.send_goal_future.add_done_callback(self.goal_response_callback)
@@ -309,17 +373,20 @@ class Robot(Node):
         self.goal_handle = None
         self.goal_sent = False
         self.goal_done = True
+        self.arrived_at_search_pose = True
 
     def cancel_goal(self):
         if self.goal_handle is not None:
-            self.goal_handle.cancel_goal_async()
+            cancel_future = self.goal_handle.cancel_goal_async()
+            rclpy.spin_until_future_complete(self, cancel_future, timeout_sec=2.0)
 
         self.goal_handle = None
         self.goal_sent = False
         self.goal_done = True
+        self.arrived_at_search_pose = False
 
     def search_for_blue(self):
-        if self.goal_done and len(self.search_positions) > 0:
+        if self.goal_done and not self.arrived_at_search_pose and len(self.search_positions) > 0:
             x = self.search_positions[self.search_index][0]
             y = self.search_positions[self.search_index][1]
             yaw = self.search_positions[self.search_index][2]
@@ -330,20 +397,61 @@ class Robot(Node):
             if self.search_index >= len(self.search_positions):
                 self.search_index = 0
 
+    def start_scanning(self):
+        self.stop()
+        self.scan_start_time = time.time()
+        self.state = self.SCANNING
+
+    def scan_for_blue(self):
+        if self.blue_flag == 1:
+            self.state = self.APPROACHING_BLUE
+            self.blue_lost_count = 0
+            return
+
+        if self.scan_start_time is None:
+            self.scan_start_time = time.time()
+
+        if time.time() - self.scan_start_time < self.scan_duration:
+            self.scan_turn()
+        else:
+            self.stop()
+            self.arrived_at_search_pose = False
+            self.scan_start_time = None
+            self.scan_direction *= -1
+            self.state = self.SEARCHING
+
     def approach_blue(self):
         image_centre = self.image_width // 2
 
-        if self.blue_area > self.stop_area:
-            self.stop()
-            self.task_finished = True
-            return
+        if self.blue_visible_now == 1:
+            self.blue_lost_count = 0
 
-        if self.blue_cx < image_centre - self.centre_margin:
-            self.turn_left()
-        elif self.blue_cx > image_centre + self.centre_margin:
-            self.turn_right()
+            if self.stop_confirm_count >= self.stop_confirm_frames:
+                self.stop()
+                self.task_finished = True
+                self.state = self.FINISHED
+                return
+
+            if self.blue_cx < image_centre - self.centre_margin:
+                self.turn_left()
+            elif self.blue_cx > image_centre + self.centre_margin:
+                self.turn_right()
+            else:
+                self.walk_forward()
+
         else:
-            self.walk_forward()
+            self.blue_lost_count += 1
+
+            if self.blue_lost_count <= self.blue_recovery_frames:
+                if self.last_seen_turn_direction == 'left':
+                    self.turn_left()
+                else:
+                    self.turn_right()
+            else:
+                self.stop()
+                self.blue_lost_count = 0
+                self.scan_start_time = None
+                self.state = self.SEARCHING
 
 
 def main():
@@ -354,25 +462,47 @@ def main():
         while rclpy.ok():
             rclpy.spin_once(robot, timeout_sec=0.1)
 
-            if robot.blue_flag == 1:
+            if robot.state == robot.SEARCHING:
+                if robot.blue_flag == 1:
+                    if robot.goal_sent:
+                        robot.cancel_goal()
+                        time.sleep(0.2)
+                    robot.state = robot.APPROACHING_BLUE
+                elif robot.arrived_at_search_pose:
+                    robot.start_scanning()
+                else:
+                    robot.search_for_blue()
+
+            elif robot.state == robot.SCANNING:
+                robot.scan_for_blue()
+
+            elif robot.state == robot.APPROACHING_BLUE:
                 if robot.goal_sent:
                     robot.cancel_goal()
-                    time.sleep(0.3)
-
+                    time.sleep(0.2)
                 robot.approach_blue()
 
-                if robot.task_finished:
-                    break
-            else:
-                robot.search_for_blue()
+            elif robot.state == robot.FINISHED:
+                robot.stop()
+
+                for _ in range(10):
+                    rclpy.spin_once(robot, timeout_sec=0.05)
+
+                break
 
             time.sleep(0.05)
 
     except ROSInterruptException:
         pass
     finally:
-        robot.cancel_goal()
+        if robot.goal_sent or robot.goal_handle is not None:
+            robot.cancel_goal()
+
         robot.stop()
+
+        for _ in range(5):
+            rclpy.spin_once(robot, timeout_sec=0.05)
+
         cv2.destroyAllWindows()
         robot.destroy_node()
         rclpy.shutdown()
