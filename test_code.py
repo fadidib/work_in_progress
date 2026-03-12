@@ -1,4 +1,3 @@
-import threading
 import time
 import math
 import cv2
@@ -11,7 +10,6 @@ from cv_bridge import CvBridge
 from rclpy.exceptions import ROSInterruptException
 from rclpy.action import ActionClient
 from nav2_msgs.action import NavigateToPose
-import signal
 
 
 class Robot(Node):
@@ -20,7 +18,6 @@ class Robot(Node):
 
         # Publisher for robot velocity
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.rate = self.create_rate(10)
 
         # Nav2 action client
         self.navigate_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -60,6 +57,12 @@ class Robot(Node):
         self.search_positions = self.create_search_positions()
         self.search_index = 0
 
+        # Debug image display
+        self.show_debug = True
+        if self.show_debug:
+            cv2.namedWindow('Detection', cv2.WINDOW_NORMAL)
+            cv2.resizeWindow('Detection', 640, 480)
+
         # Image subscriber
         self.bridge = CvBridge()
         self.subscription = self.create_subscription(
@@ -85,6 +88,12 @@ class Robot(Node):
         self.blue_area = 0
         self.blue_cx = 0
 
+    def clean_mask(self, mask):
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        return mask
+
     def callback(self, data):
         try:
             image = self.bridge.imgmsg_to_cv2(data, 'bgr8')
@@ -92,7 +101,6 @@ class Robot(Node):
             return
 
         self.image_width = image.shape[1]
-
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
         # GREEN
@@ -118,6 +126,11 @@ class Robot(Node):
         red_mask_2 = cv2.inRange(hsv_image, red_lower_2, red_upper_2)
         red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
 
+        # Clean masks
+        green_mask = self.clean_mask(green_mask)
+        blue_mask = self.clean_mask(blue_mask)
+        red_mask = self.clean_mask(red_mask)
+
         # Find contours
         green_contours, _ = cv2.findContours(
             green_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
@@ -136,10 +149,9 @@ class Robot(Node):
         self.detect_red(image, red_contours)
         self.draw_debug_info(image)
 
-        cv2.namedWindow('Detection', cv2.WINDOW_NORMAL)
-        cv2.imshow('Detection', image)
-        cv2.resizeWindow('Detection', 640, 480)
-        cv2.waitKey(3)
+        if self.show_debug:
+            cv2.imshow('Detection', image)
+            cv2.waitKey(1)
 
     def detect_green(self, image, green_contours):
         if len(green_contours) > 0:
@@ -185,14 +197,6 @@ class Robot(Node):
                 cv2.rectangle(image, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
     def draw_debug_info(self, image):
-        cv2.line(
-            image,
-            (self.image_width // 2, 0),
-            (self.image_width // 2, image.shape[0]),
-            (0, 255, 255),
-            2
-        )
-
         cv2.putText(
             image,
             'Seen R:{} G:{} B:{}'.format(self.red_seen, self.green_seen, self.blue_seen),
@@ -318,26 +322,17 @@ class Robot(Node):
 
 
 def main():
-    def signal_handler(sig, frame):
-        robot.cancel_goal()
-        robot.stop()
-        rclpy.shutdown()
-
     rclpy.init(args=None)
     robot = Robot()
 
-    signal.signal(signal.SIGINT, signal_handler)
-    thread = threading.Thread(target=rclpy.spin, args=(robot,), daemon=True)
-    thread.start()
-
     try:
         while rclpy.ok():
+            rclpy.spin_once(robot, timeout_sec=0.1)
 
             if robot.blue_flag == 1:
-
                 if robot.goal_sent:
                     robot.cancel_goal()
-                    time.sleep(0.5)
+                    time.sleep(0.3)
 
                 robot.approach_blue()
 
@@ -347,16 +342,16 @@ def main():
             else:
                 robot.search_for_blue()
 
-            robot.rate.sleep()
+            time.sleep(0.05)
 
     except ROSInterruptException:
         pass
-
-    robot.cancel_goal()
-    robot.stop()
-    cv2.destroyAllWindows()
-    robot.destroy_node()
-    rclpy.shutdown()
+    finally:
+        robot.cancel_goal()
+        robot.stop()
+        cv2.destroyAllWindows()
+        robot.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
