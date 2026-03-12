@@ -16,6 +16,8 @@ class Robot(Node):
     def __init__(self):
         super().__init__('robot')
 
+        print('RUNNING NEW PROJECT_FILE - NO CENTRE LINE VERSION')
+
         # Publisher for robot velocity
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
 
@@ -48,12 +50,16 @@ class Robot(Node):
         self.image_width = 640
         self.centre_margin = 60
 
+        # Blue persistence / recovery
+        self.blue_detect_counter = 0
+        self.blue_detect_threshold = 3
+        self.blue_lost_counter = 0
+        self.blue_lost_threshold = 10
+
         # Task flag
         self.task_finished = False
 
         # Grid-based search poses
-        # Replace these with your final tested RViz / map coordinates
-        # Format: [x, y, yaw_in_radians]
         self.search_positions = self.create_search_positions()
         self.search_index = 0
 
@@ -68,22 +74,21 @@ class Robot(Node):
         self.subscription = self.create_subscription(
             Image, '/camera/image_raw', self.callback, 10
         )
-        self.subscription  # prevent unused variable warning
+        self.subscription
 
     def create_search_positions(self):
         search_positions = [
-            [4.0, 1.0, 1.57],   # bottom-right starting patch, look upward
-            [3.0, 2.2, 3.14],   # centre-right opening, look left
-            [2.0, 1.5, 1.57],   # lower-middle patch, look upward
-            [1.2, 1.2, 1.20],   # lower-left patch, look up-right
-            [1.2, 3.0, 0.0],    # upper-left patch, look right toward blue
-            [3.2, 3.2, 3.14]    # upper-right patch, look left toward red
+            [4.0, 1.0, 1.57],
+            [3.0, 2.2, 3.14],
+            [2.0, 1.5, 1.57],
+            [1.2, 1.2, 1.20],
+            [1.2, 3.0, 0.0],
+            [3.2, 3.2, 3.14]
         ]
         return search_positions
 
     def reset_detection_flags(self):
         self.green_flag = 0
-        self.blue_flag = 0
         self.red_flag = 0
         self.blue_area = 0
         self.blue_cx = 0
@@ -111,7 +116,7 @@ class Robot(Node):
         blue_lower = np.array([120 - self.sensitivity, 100, 100])
         blue_upper = np.array([120 + self.sensitivity, 255, 255])
 
-        # RED - use two ranges because red wraps around the HSV scale
+        # RED - two ranges
         red_lower_1 = np.array([0, 100, 100])
         red_upper_1 = np.array([self.sensitivity, 255, 255])
 
@@ -121,7 +126,6 @@ class Robot(Node):
         # Masks
         green_mask = cv2.inRange(hsv_image, green_lower, green_upper)
         blue_mask = cv2.inRange(hsv_image, blue_lower, blue_upper)
-
         red_mask_1 = cv2.inRange(hsv_image, red_lower_1, red_upper_1)
         red_mask_2 = cv2.inRange(hsv_image, red_lower_2, red_upper_2)
         red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
@@ -145,8 +149,23 @@ class Robot(Node):
         self.reset_detection_flags()
 
         self.detect_green(image, green_contours)
-        self.detect_blue(image, blue_contours)
+        blue_seen_this_frame = self.detect_blue(image, blue_contours)
         self.detect_red(image, red_contours)
+
+        # Blue persistence logic
+        if blue_seen_this_frame:
+            self.blue_detect_counter += 1
+            self.blue_lost_counter = 0
+        else:
+            self.blue_detect_counter = 0
+            self.blue_lost_counter += 1
+
+        if self.blue_detect_counter >= self.blue_detect_threshold:
+            self.blue_flag = 1
+            self.blue_seen = 1
+        elif self.blue_lost_counter >= self.blue_lost_threshold:
+            self.blue_flag = 0
+
         self.draw_debug_info(image)
 
         if self.show_debug:
@@ -171,8 +190,6 @@ class Robot(Node):
             area = cv2.contourArea(c)
 
             if area > self.follow_area:
-                self.blue_flag = 1
-                self.blue_seen = 1
                 self.blue_area = area
 
                 x, y, w, h = cv2.boundingRect(c)
@@ -183,6 +200,10 @@ class Robot(Node):
                     self.blue_cx = int(M['m10'] / M['m00'])
                     blue_cy = int(M['m01'] / M['m00'])
                     cv2.circle(image, (self.blue_cx, blue_cy), 5, (255, 0, 0), -1)
+
+                return True
+
+        return False
 
     def detect_red(self, image, red_contours):
         if len(red_contours) > 0:
@@ -217,14 +238,19 @@ class Robot(Node):
             2
         )
 
+        cv2.putText(
+            image,
+            'Blue flag: {}'.format(self.blue_flag),
+            (10, 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
+
     def walk_forward(self):
         desired_velocity = Twist()
         desired_velocity.linear.x = 0.12
-        self.publisher.publish(desired_velocity)
-
-    def walk_backward(self):
-        desired_velocity = Twist()
-        desired_velocity.linear.x = -0.08
         self.publisher.publish(desired_velocity)
 
     def turn_left(self):
@@ -252,7 +278,6 @@ class Robot(Node):
         goal_msg.pose.pose.position.x = float(x)
         goal_msg.pose.pose.position.y = float(y)
         goal_msg.pose.pose.position.z = 0.0
-
         goal_msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
         goal_msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
 
@@ -338,7 +363,6 @@ def main():
 
                 if robot.task_finished:
                     break
-
             else:
                 robot.search_for_blue()
 
