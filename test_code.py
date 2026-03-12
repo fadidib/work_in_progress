@@ -16,7 +16,7 @@ class Robot(Node):
     def __init__(self):
         super().__init__('robot')
 
-        print('RUNNING SIMPLE PROJECT_FILE')
+        print('RUNNING SIMPLE PROJECT_FILE WITH DEBUG PRINTS')
 
         # Publisher
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -43,7 +43,7 @@ class Robot(Node):
 
         # Area thresholds
         self.follow_area = 800
-        self.stop_area = 4000
+        self.stop_area = 12000
 
         # Blue tracking
         self.blue_area = 0
@@ -59,6 +59,10 @@ class Robot(Node):
         # Lost blue handling
         self.blue_lost_count = 0
         self.blue_lost_threshold = 12
+
+        # Stop confirmation
+        self.stop_count = 0
+        self.stop_confirm_frames = 4
 
         # Mode flags
         self.pursue_blue = False
@@ -80,6 +84,12 @@ class Robot(Node):
             Image, '/camera/image_raw', self.callback, 10
         )
         self.subscription
+
+        # Debug trackers to reduce spam
+        self.last_printed_mode = None
+        self.last_printed_blue_flag = None
+        self.last_printed_goal_sent = None
+        self.last_printed_goal_done = None
 
     def create_search_positions(self):
         # REPLACE THESE WITH YOUR REAL TESTED COORDINATES
@@ -108,7 +118,8 @@ class Robot(Node):
     def callback(self, data):
         try:
             image = self.bridge.imgmsg_to_cv2(data, 'bgr8')
-        except Exception:
+        except Exception as e:
+            print('ERROR in callback image conversion:', e)
             return
 
         self.image_width = image.shape[1]
@@ -221,6 +232,8 @@ class Robot(Node):
 
         if self.blue_detect_count >= self.blue_confirm_frames:
             self.blue_flag = 1
+        else:
+            self.blue_flag = 0
 
     def draw_debug_info(self, image):
         cv2.putText(
@@ -253,6 +266,16 @@ class Robot(Node):
             2
         )
 
+        cv2.putText(
+            image,
+            'Blue flag: {}'.format(int(self.blue_flag)),
+            (10, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
+
     def walk_forward(self):
         desired_velocity = Twist()
         desired_velocity.linear.x = 0.12
@@ -273,7 +296,10 @@ class Robot(Node):
         self.publisher.publish(desired_velocity)
 
     def send_goal(self, x, y, yaw):
+        print(f'SENDING GOAL -> index:{self.search_index} x:{x:.2f} y:{y:.2f} yaw:{yaw:.2f}')
+
         if not self.navigate_client.wait_for_server(timeout_sec=1.0):
+            print('NAV2 SERVER NOT AVAILABLE')
             return
 
         goal_msg = NavigateToPose.Goal()
@@ -293,34 +319,40 @@ class Robot(Node):
         self.send_goal_future.add_done_callback(self.goal_response_callback)
 
     def goal_response_callback(self, future):
+        print('GOAL RESPONSE CALLBACK CALLED')
         try:
             self.goal_handle = future.result()
-        except Exception:
+        except Exception as e:
+            print('ERROR in goal_response_callback:', e)
             self.goal_handle = None
             self.goal_sent = False
             self.goal_done = True
             return
 
         if self.goal_handle is None or not self.goal_handle.accepted:
+            print('GOAL NOT ACCEPTED')
             self.goal_handle = None
             self.goal_sent = False
             self.goal_done = True
             return
 
+        print('GOAL ACCEPTED')
         self.get_result_future = self.goal_handle.get_result_async()
         self.get_result_future.add_done_callback(self.get_result_callback)
 
     def get_result_callback(self, future):
+        print('GOAL RESULT CALLBACK CALLED')
         self.goal_handle = None
         self.goal_sent = False
         self.goal_done = True
 
     def cancel_goal(self):
+        print('CANCEL GOAL CALLED')
         try:
             if self.goal_handle is not None:
                 self.goal_handle.cancel_goal_async()
-        except Exception:
-            pass
+        except Exception as e:
+            print('ERROR in cancel_goal:', e)
 
         self.goal_handle = None
         self.goal_sent = False
@@ -341,16 +373,35 @@ class Robot(Node):
     def approach_blue(self):
         image_centre = self.image_width // 2
 
+        print(
+            f'APPROACH BLUE -> area:{self.blue_area:.1f} '
+            f'stop_area:{self.stop_area} '
+            f'cx:{self.blue_cx} '
+            f'image_centre:{image_centre}'
+        )
+
         if self.blue_area > self.stop_area:
+            self.stop_count += 1
+            print(f'STOP COUNT INCREMENTED -> {self.stop_count}/{self.stop_confirm_frames}')
+        else:
+            if self.stop_count != 0:
+                print('STOP COUNT RESET TO 0')
+            self.stop_count = 0
+
+        if self.stop_count >= self.stop_confirm_frames:
+            print('TASK FINISHED CONDITION MET')
             self.stop()
             self.task_finished = True
             return
 
         if self.blue_cx < image_centre - self.centre_margin:
+            print('TURNING LEFT TO CENTER BLUE')
             self.turn_left()
         elif self.blue_cx > image_centre + self.centre_margin:
+            print('TURNING RIGHT TO CENTER BLUE')
             self.turn_right()
         else:
+            print('MOVING FORWARD TOWARD BLUE')
             self.walk_forward()
 
 
@@ -358,12 +409,35 @@ def main():
     rclpy.init(args=None)
     robot = Robot()
 
+    print('ENTERING MAIN LOOP')
+
     try:
         while rclpy.ok():
             rclpy.spin_once(robot, timeout_sec=0.1)
 
+            if robot.pursue_blue != robot.last_printed_mode:
+                print(f'MODE CHANGE -> pursue_blue = {robot.pursue_blue}')
+                robot.last_printed_mode = robot.pursue_blue
+
+            if robot.blue_flag != robot.last_printed_blue_flag:
+                print(
+                    f'BLUE FLAG CHANGE -> blue_flag:{robot.blue_flag} '
+                    f'blue_visible_now:{robot.blue_visible_now} '
+                    f'blue_detect_count:{robot.blue_detect_count}'
+                )
+                robot.last_printed_blue_flag = robot.blue_flag
+
+            if robot.goal_sent != robot.last_printed_goal_sent:
+                print(f'GOAL_SENT CHANGE -> {robot.goal_sent}')
+                robot.last_printed_goal_sent = robot.goal_sent
+
+            if robot.goal_done != robot.last_printed_goal_done:
+                print(f'GOAL_DONE CHANGE -> {robot.goal_done}')
+                robot.last_printed_goal_done = robot.goal_done
+
             # Once blue is confirmed, switch once into blue pursuit
-            if robot.blue_flag == 1:
+            if robot.blue_flag == 1 and not robot.pursue_blue:
+                print('SWITCHING TO PURSUE BLUE MODE')
                 robot.pursue_blue = True
 
             if not robot.pursue_blue:
@@ -372,6 +446,7 @@ def main():
             else:
                 # Cancel Nav2 once when switching away from search
                 if robot.goal_sent:
+                    print('PURSUE MODE ACTIVE -> CANCELLING CURRENT NAV GOAL')
                     robot.cancel_goal()
                     time.sleep(0.2)
 
@@ -382,6 +457,10 @@ def main():
                 else:
                     # If blue is lost, turn to try to reacquire it
                     robot.blue_lost_count += 1
+                    print(
+                        f'BLUE LOST TEMPORARILY -> count:{robot.blue_lost_count}/'
+                        f'{robot.blue_lost_threshold} turning {robot.last_seen_turn_direction}'
+                    )
 
                     if robot.last_seen_turn_direction == 'left':
                         robot.turn_left()
@@ -389,20 +468,34 @@ def main():
                         robot.turn_right()
 
                 if robot.task_finished:
+                    print('MAIN LOOP BREAKING -> task_finished = True')
                     robot.stop()
                     break
 
             time.sleep(0.05)
 
-    except ROSInterruptException:
-        pass
+    except ROSInterruptException as e:
+        print('ROSInterruptException CAUGHT:', e)
+    except Exception as e:
+        print('UNEXPECTED EXCEPTION IN MAIN:', e)
+        raise
     finally:
+        print('ENTERING FINALLY BLOCK')
+
         if robot.goal_sent or robot.goal_handle is not None:
+            print('FINAL CLEANUP -> cancelling goal')
             robot.cancel_goal()
 
+        print('FINAL CLEANUP -> stopping robot')
         robot.stop()
+
+        print('FINAL CLEANUP -> destroying windows')
         cv2.destroyAllWindows()
+
+        print('FINAL CLEANUP -> destroying node')
         robot.destroy_node()
+
+        print('FINAL CLEANUP -> shutting down rclpy')
         rclpy.shutdown()
 
 
