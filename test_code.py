@@ -16,7 +16,7 @@ class Robot(Node):
     def __init__(self):
         super().__init__('robot')
 
-        print('RUNNING SIMPLE PROJECT_FILE WITH DEBUG PRINTS')
+        print('RUNNING SIMPLE PROJECT_FILE WITH SMOOTHER BLUE APPROACH')
 
         # Publisher
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -49,8 +49,15 @@ class Robot(Node):
         self.blue_area = 0
         self.blue_cx = 0
         self.image_width = 640
-        self.centre_margin = 60
+        self.centre_margin = 90
+        self.small_error_margin = 35
         self.last_seen_turn_direction = 'left'
+
+        # Motion tuning
+        self.turn_speed = 0.18
+        self.forward_speed = 0.10
+        self.slow_forward_speed = 0.07
+        self.small_turn_speed = 0.08
 
         # Simple blue confirmation
         self.blue_detect_count = 0
@@ -94,12 +101,12 @@ class Robot(Node):
     def create_search_positions(self):
         # REPLACE THESE WITH YOUR REAL TESTED COORDINATES
         return [
-            [1.89, 1.09, 1.57],   # bottom-right starting patch, look upward
-            [-2.82, -4.22, -1.57],   # centre-right opening, look left
-            [4.71, -5.33, 3.14],   # lower-middle patch, look upward
-            [-2.82, -4.22, -1.57],   # lower-left patch, look up-right
-            [-6.84, -3.22, 0.0],    # upper-left patch, look right toward blue
-            [-8.00, -7.87, -1.57] 
+            [1.89, 1.09, 1.57],
+            [-2.82, -4.22, -1.57],
+            [4.71, -5.33, 3.14],
+            [-2.82, -4.22, -1.57],
+            [-6.84, -3.22, 0.0],
+            [-8.00, -7.87, -1.57]
         ]
 
     def reset_detection_flags(self):
@@ -278,17 +285,29 @@ class Robot(Node):
 
     def walk_forward(self):
         desired_velocity = Twist()
-        desired_velocity.linear.x = 0.12
+        desired_velocity.linear.x = self.forward_speed
         self.publisher.publish(desired_velocity)
 
     def turn_left(self):
         desired_velocity = Twist()
-        desired_velocity.angular.z = 0.35
+        desired_velocity.angular.z = self.turn_speed
         self.publisher.publish(desired_velocity)
 
     def turn_right(self):
         desired_velocity = Twist()
-        desired_velocity.angular.z = -0.35
+        desired_velocity.angular.z = -self.turn_speed
+        self.publisher.publish(desired_velocity)
+
+    def move_forward_left(self):
+        desired_velocity = Twist()
+        desired_velocity.linear.x = self.slow_forward_speed
+        desired_velocity.angular.z = self.small_turn_speed
+        self.publisher.publish(desired_velocity)
+
+    def move_forward_right(self):
+        desired_velocity = Twist()
+        desired_velocity.linear.x = self.slow_forward_speed
+        desired_velocity.angular.z = -self.small_turn_speed
         self.publisher.publish(desired_velocity)
 
     def stop(self):
@@ -372,12 +391,14 @@ class Robot(Node):
 
     def approach_blue(self):
         image_centre = self.image_width // 2
+        error = self.blue_cx - image_centre
 
         print(
             f'APPROACH BLUE -> area:{self.blue_area:.1f} '
             f'stop_area:{self.stop_area} '
             f'cx:{self.blue_cx} '
-            f'image_centre:{image_centre}'
+            f'image_centre:{image_centre} '
+            f'error:{error}'
         )
 
         if self.blue_area > self.stop_area:
@@ -394,14 +415,24 @@ class Robot(Node):
             self.task_finished = True
             return
 
-        if self.blue_cx < image_centre - self.centre_margin:
+        if error < -self.centre_margin:
             print('TURNING LEFT TO CENTER BLUE')
             self.turn_left()
-        elif self.blue_cx > image_centre + self.centre_margin:
+
+        elif error > self.centre_margin:
             print('TURNING RIGHT TO CENTER BLUE')
             self.turn_right()
+
+        elif error < -self.small_error_margin:
+            print('MOVING FORWARD WITH SMALL LEFT CORRECTION')
+            self.move_forward_left()
+
+        elif error > self.small_error_margin:
+            print('MOVING FORWARD WITH SMALL RIGHT CORRECTION')
+            self.move_forward_right()
+
         else:
-            print('MOVING FORWARD TOWARD BLUE')
+            print('MOVING STRAIGHT TOWARD BLUE')
             self.walk_forward()
 
 
