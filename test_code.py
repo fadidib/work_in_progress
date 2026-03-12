@@ -16,7 +16,7 @@ class Robot(Node):
     def __init__(self):
         super().__init__('robot')
 
-        print('RUNNING STABLE PROJECT_FILE')
+        print('RUNNING SIMPLE PROJECT_FILE')
 
         # Publisher
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -27,13 +27,13 @@ class Robot(Node):
         self.goal_sent = False
         self.goal_done = True
 
-        # Detection flags for current frame
+        # Detection flags
         self.green_flag = 0
         self.blue_flag = 0
         self.red_flag = 0
         self.blue_visible_now = 0
 
-        # "Seen at least once" flags for debug/video only
+        # Seen at least once
         self.green_seen = 0
         self.blue_seen = 0
         self.red_seen = 0
@@ -52,7 +52,7 @@ class Robot(Node):
         self.centre_margin = 60
         self.last_seen_turn_direction = 'left'
 
-        # Blue confirmation
+        # Simple blue confirmation
         self.blue_detect_count = 0
         self.blue_confirm_frames = 3
 
@@ -60,10 +60,8 @@ class Robot(Node):
         self.blue_lost_count = 0
         self.blue_lost_threshold = 12
 
-        # Pursuit mode
+        # Mode flags
         self.pursue_blue = False
-
-        # Task complete
         self.task_finished = False
 
         # Search poses
@@ -127,7 +125,6 @@ class Robot(Node):
         # RED - two ranges because red wraps around HSV
         red_lower_1 = np.array([0, 100, 100])
         red_upper_1 = np.array([self.sensitivity, 255, 255])
-
         red_lower_2 = np.array([180 - self.sensitivity, 100, 100])
         red_upper_2 = np.array([179, 255, 255])
 
@@ -248,18 +245,8 @@ class Robot(Node):
 
         cv2.putText(
             image,
-            'Blue flag: {}'.format(self.blue_flag),
-            (10, 75),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2
-        )
-
-        cv2.putText(
-            image,
             'Pursue blue: {}'.format(int(self.pursue_blue)),
-            (10, 100),
+            (10, 75),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (255, 255, 255),
@@ -329,7 +316,6 @@ class Robot(Node):
         self.goal_done = True
 
     def cancel_goal(self):
-        # Non-blocking cancel to avoid executor/action deadlock issues
         try:
             if self.goal_handle is not None:
                 self.goal_handle.cancel_goal_async()
@@ -376,7 +362,7 @@ def main():
         while rclpy.ok():
             rclpy.spin_once(robot, timeout_sec=0.1)
 
-            # Once blue is confirmed, switch once into pursuit mode
+            # Once blue is confirmed, switch once into blue pursuit
             if robot.blue_flag == 1:
                 robot.pursue_blue = True
 
@@ -384,7 +370,7 @@ def main():
                 robot.search_for_blue()
 
             else:
-                # Cancel Nav2 once when entering blue pursuit
+                # Cancel Nav2 once when switching away from search
                 if robot.goal_sent:
                     robot.cancel_goal()
                     time.sleep(0.2)
@@ -394,29 +380,16 @@ def main():
                     robot.blue_lost_count = 0
                     robot.approach_blue()
                 else:
-                    # If blue is temporarily lost, rotate to reacquire
+                    # If blue is lost, turn to try to reacquire it
                     robot.blue_lost_count += 1
 
-                    if robot.blue_lost_count <= robot.blue_lost_threshold:
-                        if robot.last_seen_turn_direction == 'left':
-                            robot.turn_left()
-                        else:
-                            robot.turn_right()
+                    if robot.last_seen_turn_direction == 'left':
+                        robot.turn_left()
                     else:
-                        # Stay in pursuit mode but keep searching locally
-                        robot.blue_lost_count = 0
-                        if robot.last_seen_turn_direction == 'left':
-                            robot.turn_left()
-                        else:
-                            robot.turn_right()
+                        robot.turn_right()
 
                 if robot.task_finished:
                     robot.stop()
-
-                    # Let callbacks settle before shutdown
-                    for _ in range(10):
-                        rclpy.spin_once(robot, timeout_sec=0.05)
-
                     break
 
             time.sleep(0.05)
@@ -428,10 +401,6 @@ def main():
             robot.cancel_goal()
 
         robot.stop()
-
-        for _ in range(5):
-            rclpy.spin_once(robot, timeout_sec=0.05)
-
         cv2.destroyAllWindows()
         robot.destroy_node()
         rclpy.shutdown()
